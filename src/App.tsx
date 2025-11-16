@@ -18,12 +18,24 @@ function App() {
   const [sessionId, setSessionId] = useState<string | null>(() => {
     try { return localStorage.getItem('chat_session_id') } catch { return null }
   })
+  const [attachedFile, setAttachedFile] = useState<File | null>(null)
+  const [attachedPreviewUrl, setAttachedPreviewUrl] = useState<string | null>(null)
   useEffect(() => {
     try {
       if (sessionId) localStorage.setItem('chat_session_id', sessionId)
       else localStorage.removeItem('chat_session_id')
     } catch {}
   }, [sessionId])
+  useEffect(() => {
+    // create/revoke local preview URL for attached file (optional)
+    if (!attachedFile) {
+      setAttachedPreviewUrl(null)
+      return
+    }
+    const url = URL.createObjectURL(attachedFile)
+    setAttachedPreviewUrl(url)
+    return () => { URL.revokeObjectURL(url); setAttachedPreviewUrl(null) }
+  }, [attachedFile])
   const listRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -40,10 +52,15 @@ function App() {
 
   async function sendMessage() {
     const text = input.trim()
-    if (!text) return
-    const userMsg: ChatMessage = { id: String(Date.now()), role: 'user', content: text, ts: Date.now() }
+    if (!text && !attachedFile) return
+    // include attachment name in the user-visible message
+    const userContent = text + (attachedFile ? `\n[Attachment: ${attachedFile.name}]` : '')
+    const userMsg: ChatMessage = { id: String(Date.now()), role: 'user', content: userContent, ts: Date.now() }
     setMessages((m) => [...m, userMsg])
     setInput('')
+    // clear selected file immediately in UI (we will still upload it)
+    const fileToUpload = attachedFile
+    setAttachedFile(null)
     setSending(true)
 
     // create assistant placeholder so we can stream into it
@@ -53,16 +70,22 @@ function App() {
 
     try {
       const base = import.meta.env.VITE_API_BASE ?? ''
-      const res = await fetch(`${base}/chatagent`, {
+      // Always send FormData so backend receives form fields even if no file
+      const form = new FormData()
+      form.append('userchat', userContent)
+      if (sessionId) form.append('session_id', sessionId)
+      if (fileToUpload) form.append('file', fileToUpload, fileToUpload.name)
+
+      const fetchOptions: RequestInit = {
         method: 'POST',
+        // DO NOT set Content-Type — browser will set multipart boundary
+        body: form,
         headers: {
-          'Content-Type': 'application/json',
-          // prefer stream/SSE if backend supports it
           Accept: 'text/event-stream, text/plain, application/json',
         },
-        // include session_id so backend can resume/create session
-        body: JSON.stringify({ userchat: userMsg.content, session_id: sessionId }),
-      })
+      }
+
+      const res = await fetch(`${base}/chatagent`, fetchOptions)
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
 
       // if response has body stream, read incrementally
@@ -212,18 +235,37 @@ function App() {
         </div>
 
         <div className="composer">
+          <div className="attach-row">
+            <label className="file-label">
+              Attach
+              <input
+                type="file"
+                accept=".pdf,.doc,.docx"
+                onChange={(e) => {
+                  const f = e.target.files?.[0] ?? null
+                  setAttachedFile(f)
+                }}
+              />
+            </label>
+            {attachedFile && (
+              <div className="attached-info">
+                <span className="filename">{attachedFile.name}</span>
+                <button type="button" className="remove-attach" onClick={() => setAttachedFile(null)}>Remove</button>
+              </div>
+            )}
+          </div>
           <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Type a message and press Enter (Shift+Enter for newline)..."
-            disabled={sending}
-            rows={1}
-          />
-          <button onClick={sendMessage} disabled={sending || !input.trim()} className="send-btn">
-            {sending ? 'Sending…' : 'Send'}
-          </button>
-        </div>
+           value={input}
+           onChange={(e) => setInput(e.target.value)}
+           onKeyDown={handleKeyDown}
+           placeholder="Type a message and press Enter (Shift+Enter for newline)..."
+           disabled={sending}
+           rows={1}
+         />
+         <button onClick={sendMessage} disabled={sending || !input.trim()} className="send-btn">
+           {sending ? 'Sending…' : 'Send'}
+         </button>
+       </div>
       </div>
     </>
   )
